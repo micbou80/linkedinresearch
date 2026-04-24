@@ -34,4 +34,5 @@ jobs:
           git config user.email "cleo@github-actions"
           git add results.tsv Posts/
           git diff --staged --quiet || git commit -m "data: metrics $(date +%Y-%m-%d)"
+          git pull --rebase origin main
           git push

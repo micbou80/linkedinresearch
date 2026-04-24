@@ -42,4 +42,5 @@ jobs:
           git config user.email "cleo@github-actions"
           git add "Posts/" "Lead Magnets/" "data/research_today.md"
           git diff --staged --quiet || git commit -m "feat: daily content $(date +%Y-%m-%d)"
+          git pull --rebase origin main
           git push
