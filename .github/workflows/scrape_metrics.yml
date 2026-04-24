@@ -24,8 +24,6 @@ jobs:
         run: python pipeline/apify_scraper.py
         env:
           APIFY_API_KEY: ${{ secrets.APIFY_API_KEY }}
-          APIFY_ACTOR_ID: ${{ secrets.APIFY_ACTOR_ID }}
-          LINKEDIN_PROFILE_URL: ${{ secrets.LINKEDIN_PROFILE_URL }}
 
       - name: Commit and push
         run: |

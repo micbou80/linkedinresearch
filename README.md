@@ -7,7 +7,7 @@ Autonomous LinkedIn content engine. Creates daily posts + lead magnets, tracks e
 ```
 [strategy.md + research] → generate_content.py → Post + Lead Magnet
                                                            ↓
-                                                  [You publish manually]
+                                                  [Michel publishes manually]
                                                            ↓
                                           apify_scraper.py → results.tsv
                                                            ↓
@@ -20,7 +20,7 @@ Autonomous LinkedIn content engine. Creates daily posts + lead magnets, tracks e
 |---------------------|-------------|
 | `train.py` | `strategy.md` |
 | `program.md` | `Agent/research_brief.md` |
-| `val_bpb` metric | `engagement_rate` in `results.tsv` |
+| `val_bpb` metric | `engagement_score` in `results.tsv` |
 | Agent modifies code | `autoresearch.py` rewrites strategy |
 
 ## Agents
@@ -32,37 +32,36 @@ Autonomous LinkedIn content engine. Creates daily posts + lead magnets, tracks e
 | `pipeline/apify_scraper.py` | LinkedIn → results.tsv | Daily 8pm UTC |
 | `pipeline/autoresearch.py` | results.tsv → strategy.md rewrite | Mon + Thu 6am UTC |
 
-## Setup
+## GitHub Secrets Required
 
-### GitHub Secrets
+Only **2 secrets** needed:
 
 | Secret | Description |
 |--------|-------------|
 | `ANTHROPIC_API_KEY` | Claude API key |
 | `APIFY_API_KEY` | Apify API key |
-| `APIFY_ACTOR_ID` | LinkedIn Profile Post Scraper actor ID |
-| `LINKEDIN_PROFILE_URL` | Your LinkedIn profile URL |
-| `BLOTATO_API_KEY` | (Optional) BloTato key for auto-publish |
 
-### Obsidian Sync
+Everything else (actor ID, LinkedIn username) is hardcoded as public information.
+
+## Tracking Schema (`results.tsv`)
+
+| Field | Source | Tests |
+|-------|--------|-------|
+| `hook_type` | frontmatter | H1: I-statement vs stat vs reframe |
+| `hook_text` | frontmatter / scraped | Pattern analysis |
+| `angle` | frontmatter | how_to vs contrarian vs data_led |
+| `word_count` | auto-computed | H4: optimal post length |
+| `line_count` | auto-computed | Formatting density |
+| `has_numbers` | auto-computed | H2: specific numbers |
+| `has_question_cta` | auto-computed | H3: question vs resource CTA |
+| `has_image` | scraped | Image vs text-only |
+| `hashtag_count` | auto-computed | Tag volume |
+| `total_reactions` | scraped | Volume signal |
+| `insight_reactions` | scraped | B2B quality signal |
+| `comments` | scraped | Depth signal |
+| `engagement_score` | computed | Primary metric: reactions+(comments×3)+(reposts×2) |
+| `comment_ratio` | computed | comments/reactions |
+| `insight_ratio` | computed | insight/reactions |
+
+## Obsidian Sync
 Install [Obsidian Git plugin](https://github.com/denolehov/obsidian-git), point to this repo, auto-pull every 5 min.
-
-## File Structure
-
-```
-pipeline/           ← Agent scripts
-data/
-  subreddits.json   ← Reddit communities to monitor
-  research_today.md ← Daily synthesized topics (overwritten daily)
-Posts/              ← Generated daily posts
-Lead Magnets/       ← Generated lead magnets
-Analytics/          ← Autoresearch reports
-strategy.md         ← Evolving content playbook (auto-updated)
-results.tsv         ← Post performance log
-examples/           ← Your best posts (add these for voice matching)
-```
-
-## Adding Your Example Posts
-
-Paste your best-performing LinkedIn posts into `examples/example1.md` etc.
-The content agent reads these for voice and style matching.

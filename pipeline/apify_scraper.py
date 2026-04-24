@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Metrics agent — scrapes LinkedIn via Apify sync endpoint, updates results.tsv.
 
-Apify response schema (key fields):
+Actor: apimaestro/linkedin-profile-posts
+API:   POST /acts/apimaestro~linkedin-profile-posts/run-sync-get-dataset-items
+Input: { "profileUsername": "michelbouman", "resultLimit": 30 }
+
+Apify response schema (key fields used):
   posted_at.date         -> "2026-04-21 09:33:07"
   text                   -> full post text
   url                    -> LinkedIn post URL
   stats.total_reactions  -> all reactions combined
-  stats.like             -> like count
-  stats.insight          -> insightful reactions (key B2B signal)
-  stats.comments         -> comment count
-  stats.reposts          -> repost count
-  media.type             -> "image", "video", "article", or None
+  stats.like / .insight / .comments / .reposts
+  media.type             -> "image", "video", None
 
-NOTE: Impressions are not available via this actor.
+NOTE: No impressions field in this actor's output.
 Primary metric: engagement_score = total_reactions + (comments*3) + (reposts*2)
 """
 
@@ -28,6 +29,8 @@ from pathlib import Path
 VAULT_ROOT = Path(__file__).parent.parent
 TODAY = date.today().isoformat()
 APIFY_BASE = "https://api.apify.com/v2"
+ACTOR_ID = "apimaestro~linkedin-profile-posts"
+LINKEDIN_USERNAME = "michelbouman"  # public profile, not a secret
 RESULTS = VAULT_ROOT / "results.tsv"
 FIELDS = [
     "date", "posted_time", "topic", "content_theme", "angle",
@@ -39,12 +42,15 @@ FIELDS = [
 ]
 
 
-def run_actor_sync(actor_id: str, input_data: dict, token: str) -> list:
+def run_actor_sync(token: str) -> list:
     url = (
-        f"{APIFY_BASE}/acts/{urllib.parse.quote(actor_id, safe='')}"
+        f"{APIFY_BASE}/acts/{urllib.parse.quote(ACTOR_ID, safe='')}"
         f"/run-sync-get-dataset-items?token={token}&format=json&clean=true"
     )
-    body = json.dumps(input_data).encode()
+    body = json.dumps({
+        "profileUsername": LINKEDIN_USERNAME,
+        "resultLimit": 30,
+    }).encode()
     req = urllib.request.Request(
         url, data=body,
         headers={"Content-Type": "application/json"},
@@ -57,7 +63,6 @@ def run_actor_sync(actor_id: str, input_data: dict, token: str) -> list:
 
 
 def extract_hook(text: str) -> str:
-    """First non-empty line of the post."""
     for line in text.split("\n"):
         line = line.strip()
         if line:
@@ -76,44 +81,35 @@ def count_lines(text: str) -> int:
 def parse(items: list) -> list:
     posts = []
     for item in items:
-        # --- Date and time ---
-        posted_at = item.get("posted_at", {})
-        date_str = ""
-        posted_time = ""
-        if isinstance(posted_at, dict):
-            dt = posted_at.get("date", "")  # "2026-04-21 09:33:07"
-            if dt:
-                date_str = dt[:10]           # "2026-04-21"
-                posted_time = dt[11:16]      # "09:33"
+        # Date and time
+        posted_at = item.get("posted_at", {}) or {}
+        dt = posted_at.get("date", "") if isinstance(posted_at, dict) else ""
+        date_str = dt[:10] if dt else ""
+        posted_time = dt[11:16] if len(dt) >= 16 else ""
 
-        # --- Stats ---
-        stats = item.get("stats", {})
+        # Stats
+        stats = item.get("stats", {}) or {}
         total_reactions = int(stats.get("total_reactions", 0) or 0)
         likes = int(stats.get("like", 0) or 0)
         insight = int(stats.get("insight", 0) or 0)
         comments = int(stats.get("comments", 0) or 0)
         reposts = int(stats.get("reposts", 0) or 0)
 
-        # Primary metric: weighted engagement score
         engagement_score = total_reactions + (comments * 3) + (reposts * 2)
-
-        # Quality ratios
         comment_ratio = round(comments / total_reactions, 4) if total_reactions > 0 else 0.0
         insight_ratio = round(insight / total_reactions, 4) if total_reactions > 0 else 0.0
 
-        # --- Post content signals ---
-        text = item.get("text", "")
+        # Content signals (derived from post text)
+        text = item.get("text", "") or ""
         hook_text = extract_hook(text)
         word_count = count_words(text)
         line_count = count_lines(text)
         has_numbers = bool(re.search(r"\b\d+[%hxmk$€£]?\b", text))
-        has_question_cta = text.strip().endswith("?") or bool(
-            re.search(r"\?[^\n]*$", text.strip())
-        )
+        has_question_cta = bool(re.search(r"\?\s*[👇]?\s*$", text.strip()))
         hashtag_count = len(re.findall(r"#\w+", text))
 
-        # --- Media ---
-        media = item.get("media", {}) or {}
+        # Media
+        media = item.get("media") or {}
         has_image = isinstance(media, dict) and media.get("type") in ("image", "video")
 
         posts.append({
@@ -141,7 +137,6 @@ def parse(items: list) -> list:
 
 
 def load_post_meta() -> dict:
-    """Read signals written by generate_content.py into post frontmatter."""
     posts_dir = VAULT_ROOT / "Posts"
     meta = {}
     if not posts_dir.exists():
@@ -179,16 +174,9 @@ def write_results(rows: dict):
 
 def main():
     token = os.environ["APIFY_API_KEY"]
-    actor_id = os.environ["APIFY_ACTOR_ID"]
-    profile_url = os.environ["LINKEDIN_PROFILE_URL"]
+    print(f"Scraping @{LINKEDIN_USERNAME} via {ACTOR_ID}")
 
-    actor_input = {
-        "profileUrls": [profile_url],
-        "maxPosts": 30,
-    }
-
-    print(f"Running actor: {actor_id}")
-    items = run_actor_sync(actor_id, actor_input, token)
+    items = run_actor_sync(token)
     posts = parse(items)
 
     meta = load_post_meta()
@@ -201,13 +189,11 @@ def main():
         m = meta.get(d, {})
         existing[d] = {
             "date": d,
-            # posted_time: prefer frontmatter (user-edited) over scraped
             "posted_time": m.get("posted_time") or post["posted_time"],
             "topic": m.get("topic", ""),
             "content_theme": m.get("content_theme", ""),
             "angle": m.get("angle", ""),
             "hook_type": m.get("hook_type", ""),
-            # hook_text: prefer frontmatter; fall back to scraped first line
             "hook_text": m.get("hook_text") or post["hook_text_scraped"],
             "word_count": m.get("word_count") or post["word_count"],
             "line_count": m.get("line_count") or post["line_count"],
