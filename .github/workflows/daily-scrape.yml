@@ -1,0 +1,36 @@
+name: Daily Metrics Scrape
+
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Scrape metrics
+        run: python scripts/scrape.py
+        env:
+          APIFY_API_KEY: ${{ secrets.APIFY_API_KEY }}
+          APIFY_ACTOR_ID: ${{ secrets.APIFY_ACTOR_ID }}
+          LINKEDIN_PROFILE_URL: ${{ secrets.LINKEDIN_PROFILE_URL }}
+
+      - name: Commit and push
+        run: |
+          git config user.name "Cleo Bot"
+          git config user.email "cleo@github-actions"
+          git add Analytics/ data/ Posts/
+          git diff --staged --quiet || git commit -m "data: engagement metrics $(date +%Y-%m-%d)"
+          git push
