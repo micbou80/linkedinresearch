@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
 """Metrics agent — scrapes LinkedIn via Apify sync endpoint, updates results.tsv.
 
-Actor: apimaestro/linkedin-profile-posts
+Actor: apimaestro/linkedin-profile-posts (ID: apimaestro~linkedin-profile-posts)
 API:   POST /acts/apimaestro~linkedin-profile-posts/run-sync-get-dataset-items
 Input: { "profileUsername": "michelbouman", "resultLimit": 30 }
-
-Apify response schema (key fields used):
-  posted_at.date         -> "2026-04-21 09:33:07"
-  text                   -> full post text
-  url                    -> LinkedIn post URL
-  stats.total_reactions  -> all reactions combined
-  stats.like / .insight / .comments / .reposts
-  media.type             -> "image", "video", None
-
-NOTE: No impressions field in this actor's output.
-Primary metric: engagement_score = total_reactions + (comments*3) + (reposts*2)
 """
 
 import os
@@ -23,14 +12,15 @@ import json
 import re
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import date
 from pathlib import Path
 
 VAULT_ROOT = Path(__file__).parent.parent
 TODAY = date.today().isoformat()
 APIFY_BASE = "https://api.apify.com/v2"
-ACTOR_ID = "apimaestro~linkedin-profile-posts"
-LINKEDIN_USERNAME = "michelbouman"  # public profile, not a secret
+ACTOR_ID = "apimaestro~linkedin-profile-posts"  # ~ must NOT be encoded
+LINKEDIN_USERNAME = "michelbouman"
 RESULTS = VAULT_ROOT / "results.tsv"
 FIELDS = [
     "date", "posted_time", "topic", "content_theme", "angle",
@@ -43,23 +33,37 @@ FIELDS = [
 
 
 def run_actor_sync(token: str) -> list:
+    # Keep ~ unencoded — Apify uses it as username/actorName separator
+    encoded_id = urllib.parse.quote(ACTOR_ID, safe="~")
     url = (
-        f"{APIFY_BASE}/acts/{urllib.parse.quote(ACTOR_ID, safe='')}"
+        f"{APIFY_BASE}/acts/{encoded_id}"
         f"/run-sync-get-dataset-items?token={token}&format=json&clean=true"
     )
+    print(f"POST {url.replace(token, '***')}")
+
     body = json.dumps({
         "profileUsername": LINKEDIN_USERNAME,
         "resultLimit": 30,
     }).encode()
+
     req = urllib.request.Request(
         url, data=body,
         headers={"Content-Type": "application/json"},
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=290) as resp:
-        items = json.loads(resp.read())
-    print(f"Got {len(items)} items from Apify")
-    return items
+
+    try:
+        with urllib.request.urlopen(req, timeout=290) as resp:
+            raw = resp.read()
+            print(f"HTTP {resp.status} — {len(raw)} bytes")
+            items = json.loads(raw)
+            print(f"Got {len(items)} items")
+            return items
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="ignore")
+        print(f"HTTP ERROR {e.code}: {e.reason}")
+        print(f"Response body: {body_text}")
+        raise
 
 
 def extract_hook(text: str) -> str:
@@ -81,13 +85,11 @@ def count_lines(text: str) -> int:
 def parse(items: list) -> list:
     posts = []
     for item in items:
-        # Date and time
         posted_at = item.get("posted_at", {}) or {}
         dt = posted_at.get("date", "") if isinstance(posted_at, dict) else ""
         date_str = dt[:10] if dt else ""
         posted_time = dt[11:16] if len(dt) >= 16 else ""
 
-        # Stats
         stats = item.get("stats", {}) or {}
         total_reactions = int(stats.get("total_reactions", 0) or 0)
         likes = int(stats.get("like", 0) or 0)
@@ -99,16 +101,7 @@ def parse(items: list) -> list:
         comment_ratio = round(comments / total_reactions, 4) if total_reactions > 0 else 0.0
         insight_ratio = round(insight / total_reactions, 4) if total_reactions > 0 else 0.0
 
-        # Content signals (derived from post text)
         text = item.get("text", "") or ""
-        hook_text = extract_hook(text)
-        word_count = count_words(text)
-        line_count = count_lines(text)
-        has_numbers = bool(re.search(r"\b\d+[%hxmk$€£]?\b", text))
-        has_question_cta = bool(re.search(r"\?\s*[👇]?\s*$", text.strip()))
-        hashtag_count = len(re.findall(r"#\w+", text))
-
-        # Media
         media = item.get("media") or {}
         has_image = isinstance(media, dict) and media.get("type") in ("image", "video")
 
@@ -117,13 +110,13 @@ def parse(items: list) -> list:
             "posted_time": posted_time,
             "url": item.get("url", ""),
             "text": text,
-            "hook_text_scraped": hook_text,
-            "word_count": word_count,
-            "line_count": line_count,
-            "has_numbers": has_numbers,
-            "has_question_cta": has_question_cta,
+            "hook_text_scraped": extract_hook(text),
+            "word_count": count_words(text),
+            "line_count": count_lines(text),
+            "has_numbers": bool(re.search(r"\b\d+[%hxmk$€£]?\b", text)),
+            "has_question_cta": bool(re.search(r"\?\s*[👇]?\s*$", text.strip())),
             "has_image": has_image,
-            "hashtag_count": hashtag_count,
+            "hashtag_count": len(re.findall(r"#\w+", text)),
             "total_reactions": total_reactions,
             "likes": likes,
             "insight_reactions": insight,
