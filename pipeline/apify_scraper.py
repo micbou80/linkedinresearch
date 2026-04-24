@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Metrics agent — scrapes LinkedIn via Apify sync endpoint, updates results.tsv.
-
-Actor: apimaestro/linkedin-profile-posts
-Filters to ORIGINAL posts only (author.username == michelbouman).
-Reposts of other people's content are skipped — they pollute the analytics.
-"""
+"""Metrics agent — scrapes LinkedIn via Apify sync endpoint, updates results.tsv."""
 
 import os
 import csv
@@ -38,10 +33,9 @@ def run_actor_sync(token: str) -> list:
         f"{APIFY_BASE}/acts/{encoded_id}"
         f"/run-sync-get-dataset-items?token={token}&format=json&clean=true"
     )
-    print(f"POST {url.replace(token, '***')}")
     body = json.dumps({
         "profileUsername": LINKEDIN_USERNAME,
-        "resultLimit": 30,
+        "resultLimit": 50,
     }).encode()
     req = urllib.request.Request(
         url, data=body,
@@ -51,28 +45,37 @@ def run_actor_sync(token: str) -> list:
     try:
         with urllib.request.urlopen(req, timeout=290) as resp:
             raw = resp.read()
-            print(f"HTTP {resp.status} — {len(raw)} bytes")
             items = json.loads(raw)
             print(f"Total items from Apify: {len(items)}")
             return items
     except urllib.error.HTTPError as e:
-        body_text = e.read().decode("utf-8", errors="ignore")
-        print(f"HTTP ERROR {e.code}: {e.reason}\n{body_text}")
+        print(f"HTTP ERROR {e.code}: {e.reason}\n{e.read().decode('utf-8', errors='ignore')}")
         raise
 
 
 def is_original_post(item: dict) -> bool:
-    """Return True only if Michel wrote this post (not a repost of someone else's content)."""
     author = item.get("author") or {}
     username = author.get("username", "").lower().strip()
     return username == LINKEDIN_USERNAME.lower()
 
 
+def debug_authors(items: list):
+    """Print author info for every item so we can diagnose the filter."""
+    print("\n--- Author debug ---")
+    for i, item in enumerate(items[:10]):
+        author = item.get("author") or {}
+        username = author.get("username", "[missing]")
+        name = f"{author.get('first_name', '')} {author.get('last_name', '')}" .strip()
+        hook = (item.get("text") or "")[:60].replace("\n", " ")
+        is_orig = is_original_post(item)
+        print(f"  [{i}] username={repr(username)} | name={repr(name)} | original={is_orig} | '{hook}'")
+    print("---\n")
+
+
 def extract_hook(text: str) -> str:
     for line in text.split("\n"):
-        line = line.strip()
-        if line:
-            return line[:120]
+        if line.strip():
+            return line.strip()[:120]
     return ""
 
 
@@ -85,9 +88,9 @@ def count_lines(text: str) -> int:
 
 
 def parse(items: list) -> list:
+    debug_authors(items)
     original = [i for i in items if is_original_post(i)]
-    skipped = len(items) - len(original)
-    print(f"Original posts: {len(original)} | Reposts skipped: {skipped}")
+    print(f"Original posts: {len(original)} / {len(items)} total")
 
     posts = []
     for item in original:
@@ -140,15 +143,12 @@ def load_post_meta() -> dict:
     meta = {}
     if not posts_dir.exists():
         return meta
-    fm_fields = [
-        "topic", "content_theme", "angle", "hook_type", "hook_text",
-        "word_count", "line_count", "has_numbers", "has_question_cta",
-        "hashtag_count", "lead_magnet_type", "posted_time"
-    ]
     for f in posts_dir.glob("*.md"):
         c = f.read_text(encoding="utf-8")
         record = {}
-        for field in fm_fields:
+        for field in ["topic", "content_theme", "angle", "hook_type", "hook_text",
+                      "word_count", "line_count", "has_numbers", "has_question_cta",
+                      "hashtag_count", "lead_magnet_type", "posted_time"]:
             m = re.search(rf'^{field}: "?(.*?)"?$', c, re.MULTILINE)
             record[field] = m.group(1).strip() if m else ""
         meta[f.stem] = record
@@ -168,13 +168,12 @@ def write_results(rows: dict):
         w = csv.DictWriter(f, fieldnames=FIELDS, delimiter="\t", extrasaction="ignore")
         w.writeheader()
         w.writerows(sorted_rows)
-    print(f"results.tsv: {len(sorted_rows)} original posts")
+    print(f"results.tsv: {len(sorted_rows)} rows")
 
 
 def main():
     token = os.environ["APIFY_API_KEY"]
-    print(f"Scraping @{LINKEDIN_USERNAME} — original posts only")
-
+    print(f"Scraping @{LINKEDIN_USERNAME}")
     items = run_actor_sync(token)
     posts = parse(items)
 
