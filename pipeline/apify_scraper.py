@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Metrics agent — scrapes LinkedIn via Apify sync endpoint, updates results.tsv.
 
-Actor: apimaestro/linkedin-profile-posts (ID: apimaestro~linkedin-profile-posts)
-API:   POST /acts/apimaestro~linkedin-profile-posts/run-sync-get-dataset-items
-Input: { "profileUsername": "michelbouman", "resultLimit": 30 }
+Actor: apimaestro/linkedin-profile-posts
+Filters to ORIGINAL posts only (author.username == michelbouman).
+Reposts of other people's content are skipped — they pollute the analytics.
 """
 
 import os
@@ -19,7 +19,7 @@ from pathlib import Path
 VAULT_ROOT = Path(__file__).parent.parent
 TODAY = date.today().isoformat()
 APIFY_BASE = "https://api.apify.com/v2"
-ACTOR_ID = "apimaestro~linkedin-profile-posts"  # ~ must NOT be encoded
+ACTOR_ID = "apimaestro~linkedin-profile-posts"
 LINKEDIN_USERNAME = "michelbouman"
 RESULTS = VAULT_ROOT / "results.tsv"
 FIELDS = [
@@ -33,37 +33,39 @@ FIELDS = [
 
 
 def run_actor_sync(token: str) -> list:
-    # Keep ~ unencoded — Apify uses it as username/actorName separator
     encoded_id = urllib.parse.quote(ACTOR_ID, safe="~")
     url = (
         f"{APIFY_BASE}/acts/{encoded_id}"
         f"/run-sync-get-dataset-items?token={token}&format=json&clean=true"
     )
     print(f"POST {url.replace(token, '***')}")
-
     body = json.dumps({
         "profileUsername": LINKEDIN_USERNAME,
         "resultLimit": 30,
     }).encode()
-
     req = urllib.request.Request(
         url, data=body,
         headers={"Content-Type": "application/json"},
         method="POST"
     )
-
     try:
         with urllib.request.urlopen(req, timeout=290) as resp:
             raw = resp.read()
             print(f"HTTP {resp.status} — {len(raw)} bytes")
             items = json.loads(raw)
-            print(f"Got {len(items)} items")
+            print(f"Total items from Apify: {len(items)}")
             return items
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="ignore")
-        print(f"HTTP ERROR {e.code}: {e.reason}")
-        print(f"Response body: {body_text}")
+        print(f"HTTP ERROR {e.code}: {e.reason}\n{body_text}")
         raise
+
+
+def is_original_post(item: dict) -> bool:
+    """Return True only if Michel wrote this post (not a repost of someone else's content)."""
+    author = item.get("author") or {}
+    username = author.get("username", "").lower().strip()
+    return username == LINKEDIN_USERNAME.lower()
 
 
 def extract_hook(text: str) -> str:
@@ -83,8 +85,12 @@ def count_lines(text: str) -> int:
 
 
 def parse(items: list) -> list:
+    original = [i for i in items if is_original_post(i)]
+    skipped = len(items) - len(original)
+    print(f"Original posts: {len(original)} | Reposts skipped: {skipped}")
+
     posts = []
-    for item in items:
+    for item in original:
         posted_at = item.get("posted_at", {}) or {}
         dt = posted_at.get("date", "") if isinstance(posted_at, dict) else ""
         date_str = dt[:10] if dt else ""
@@ -162,12 +168,12 @@ def write_results(rows: dict):
         w = csv.DictWriter(f, fieldnames=FIELDS, delimiter="\t", extrasaction="ignore")
         w.writeheader()
         w.writerows(sorted_rows)
-    print(f"results.tsv: {len(sorted_rows)} rows")
+    print(f"results.tsv: {len(sorted_rows)} original posts")
 
 
 def main():
     token = os.environ["APIFY_API_KEY"]
-    print(f"Scraping @{LINKEDIN_USERNAME} via {ACTOR_ID}")
+    print(f"Scraping @{LINKEDIN_USERNAME} — original posts only")
 
     items = run_actor_sync(token)
     posts = parse(items)
