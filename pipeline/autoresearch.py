@@ -5,7 +5,6 @@ import os
 import csv
 import json
 import re
-import statistics
 from datetime import datetime, date
 from pathlib import Path
 import anthropic
@@ -22,99 +21,95 @@ def load_results() -> list:
     rows = []
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f, delimiter="\t"):
-            for num_field in ("engagement_rate", "comment_rate", "likes", "comments", "shares", "impressions", "word_count", "line_count", "hashtag_count"):
+            for num_field in (
+                "engagement_score", "comment_ratio", "insight_ratio",
+                "total_reactions", "likes", "insight_reactions",
+                "comments", "reposts", "word_count", "line_count", "hashtag_count"
+            ):
                 try:
-                    row[num_field] = float(row[num_field]) if row.get(num_field) else 0.0
-                except (ValueError, KeyError):
+                    row[num_field] = float(row.get(num_field) or 0)
+                except ValueError:
                     row[num_field] = 0.0
-            for bool_field in ("has_numbers", "has_question_cta"):
+            for bool_field in ("has_numbers", "has_question_cta", "has_image"):
                 row[bool_field] = str(row.get(bool_field, "")).lower() == "true"
             rows.append(row)
     return rows
 
 
-def group_avg(rows: list, key: str, metric: str = "engagement_rate") -> dict:
-    """Average metric grouped by a categorical field."""
+def group_avg(rows: list, key: str, metric: str = "engagement_score") -> dict:
     groups: dict = {}
     for r in rows:
-        v = r.get(key, "")
+        v = str(r.get(key, "")).strip()
         if v:
             groups.setdefault(v, []).append(r.get(metric, 0))
-    return {k: round(sum(v) / len(v), 4) for k, v in groups.items() if len(v) >= 2}
+    return {
+        k: {"avg": round(sum(v) / len(v), 2), "n": len(v)}
+        for k, v in groups.items() if len(v) >= 2
+    }
 
 
-def bool_split_avg(rows: list, key: str, metric: str = "engagement_rate") -> dict:
+def bool_split_avg(rows: list, key: str, metric: str = "engagement_score") -> dict:
     true_vals = [r.get(metric, 0) for r in rows if r.get(key) is True]
     false_vals = [r.get(metric, 0) for r in rows if r.get(key) is False]
     return {
-        f"{key}=true": round(sum(true_vals) / len(true_vals), 4) if true_vals else None,
-        f"{key}=false": round(sum(false_vals) / len(false_vals), 4) if false_vals else None,
-        "true_n": len(true_vals),
-        "false_n": len(false_vals)
+        "true": {"avg": round(sum(true_vals) / len(true_vals), 2), "n": len(true_vals)} if true_vals else None,
+        "false": {"avg": round(sum(false_vals) / len(false_vals), 2), "n": len(false_vals)} if false_vals else None,
     }
 
 
-def correlation_buckets(rows: list, field: str, metric: str = "engagement_rate") -> dict:
-    """Bin a numeric field into terciles and show avg metric per bucket."""
-    vals = [r.get(field, 0) for r in rows if r.get(field, 0) > 0]
+def tercile_buckets(rows: list, field: str, metric: str = "engagement_score") -> dict:
+    vals = sorted([r.get(field, 0) for r in rows if r.get(field, 0) > 0])
     if len(vals) < 6:
-        return {}
-    vals.sort()
+        return {"note": "insufficient data"}
     n = len(vals)
-    low_thresh = vals[n // 3]
-    high_thresh = vals[2 * n // 3]
+    lo, hi = vals[n // 3], vals[2 * n // 3]
     buckets = {"low": [], "mid": [], "high": []}
     for r in rows:
         v = r.get(field, 0)
-        if v <= low_thresh:
-            buckets["low"].append(r.get(metric, 0))
-        elif v <= high_thresh:
-            buckets["mid"].append(r.get(metric, 0))
-        else:
-            buckets["high"].append(r.get(metric, 0))
+        b = "low" if v <= lo else ("mid" if v <= hi else "high")
+        buckets[b].append(r.get(metric, 0))
     return {
-        f"{field}_low_avg_{metric}": round(sum(buckets['low']) / len(buckets['low']), 4) if buckets['low'] else None,
-        f"{field}_mid_avg_{metric}": round(sum(buckets['mid']) / len(buckets['mid']), 4) if buckets['mid'] else None,
-        f"{field}_high_avg_{metric}": round(sum(buckets['high']) / len(buckets['high']), 4) if buckets['high'] else None,
-        "low_range": f"<= {low_thresh:.0f}",
-        "mid_range": f"{low_thresh:.0f} - {high_thresh:.0f}",
-        "high_range": f"> {high_thresh:.0f}"
+        "low": {"range": f"<={lo:.0f}", "avg": round(sum(buckets['low']) / len(buckets['low']), 2)} if buckets['low'] else None,
+        "mid": {"range": f"{lo:.0f}-{hi:.0f}", "avg": round(sum(buckets['mid']) / len(buckets['mid']), 2)} if buckets['mid'] else None,
+        "high": {"range": f">{hi:.0f}", "avg": round(sum(buckets['high']) / len(buckets['high']), 2)} if buckets['high'] else None,
     }
 
 
-def build_analysis_data(results: list) -> dict:
-    """Compile all hypothesis-testable signals into a structured dict."""
-    by_rate = sorted(results, key=lambda x: x.get("engagement_rate", 0), reverse=True)
-    avg_eng = sum(r.get("engagement_rate", 0) for r in results) / len(results)
-    avg_comment = sum(r.get("comment_rate", 0) for r in results) / len(results)
+def build_analysis(results: list) -> dict:
+    by_score = sorted(results, key=lambda x: x.get("engagement_score", 0), reverse=True)
+    avg_score = sum(r.get("engagement_score", 0) for r in results) / len(results)
+    avg_comment_ratio = sum(r.get("comment_ratio", 0) for r in results) / len(results)
+    avg_insight_ratio = sum(r.get("insight_ratio", 0) for r in results) / len(results)
 
     return {
         "summary": {
             "total_posts": len(results),
-            "avg_engagement_rate": round(avg_eng, 4),
-            "avg_comment_rate": round(avg_comment, 4),
+            "avg_engagement_score": round(avg_score, 1),
+            "avg_comment_ratio": round(avg_comment_ratio, 4),
+            "avg_insight_ratio": round(avg_insight_ratio, 4),
+            "metric_note": "engagement_score = total_reactions + (comments*3) + (reposts*2). No impressions available."
         },
-        "top_5_posts": by_rate[:5],
-        "bottom_5_posts": by_rate[-5:] if len(by_rate) >= 5 else [],
-        # H1: I-statement hooks
+        "top_5": by_score[:5],
+        "bottom_5": by_score[-5:] if len(by_score) >= 5 else [],
+        # H1: I-statement vs other hooks
         "by_hook_type": group_avg(results, "hook_type"),
-        # H2: Specific numbers
-        "has_numbers_split": bool_split_avg(results, "has_numbers"),
-        # H3: Question CTA
-        "has_question_cta_split": bool_split_avg(results, "has_question_cta"),
-        # H4: Post length (word count)
-        "word_count_buckets": correlation_buckets(results, "word_count"),
+        # H2: specific numbers in post
+        "has_numbers": bool_split_avg(results, "has_numbers"),
+        # H3: question CTA
+        "has_question_cta": bool_split_avg(results, "has_question_cta"),
+        # Image posts vs text-only
+        "has_image": bool_split_avg(results, "has_image"),
+        # H4: word count
+        "word_count_buckets": tercile_buckets(results, "word_count"),
         # Line count
-        "line_count_buckets": correlation_buckets(results, "line_count"),
+        "line_count_buckets": tercile_buckets(results, "line_count"),
         # Hashtag count
         "by_hashtag_count": group_avg(results, "hashtag_count"),
-        # Content theme
+        # Content dimensions
         "by_content_theme": group_avg(results, "content_theme"),
-        # Post angle
         "by_angle": group_avg(results, "angle"),
-        # Lead magnet type
         "by_lead_magnet_type": group_avg(results, "lead_magnet_type"),
-        # Posting time (hour)
+        # Posting hour
         "by_posted_hour": group_avg(
             [{**r, "hour": r.get("posted_time", "")[:2]} for r in results if r.get("posted_time")],
             "hour"
@@ -122,23 +117,24 @@ def build_analysis_data(results: list) -> dict:
     }
 
 
-def run_analysis(client: anthropic.Anthropic, analysis_data: dict, strategy: str) -> dict:
+def run_analysis(client: anthropic.Anthropic, data: dict, strategy: str) -> dict:
     resp = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=6000,
-        system="""You are a LinkedIn growth strategist running an autoresearch loop.
-You receive structured performance data with engagement signals broken down by every tracked variable.
-Your job: draw conclusions from the numbers, update the hypotheses, and rewrite the strategy playbook.
-Be specific — cite the actual numbers when you make a claim.""",
+        system="""You are a LinkedIn growth strategist running an autoresearch optimization loop.
+Analyze the structured performance data, draw data-driven conclusions about each tracked variable, and rewrite strategy.md.
+Be specific — cite actual numbers. State "insufficient data" where sample size is too small.
+Primary metric: engagement_score = total_reactions + (comments×3) + (reposts×2).
+Secondary quality signals: comment_ratio and insight_ratio.""",
         messages=[{"role": "user", "content": f"""Analyze this data and rewrite strategy.md.
 
-PERFORMANCE DATA:
-{json.dumps(analysis_data, indent=2)}
+DATA:
+{json.dumps(data, indent=2)}
 
 CURRENT STRATEGY:
 {strategy}
 
-For each tracked variable, state what the data shows (or "insufficient data").
+For each tracked variable, state what the data shows.
 Then rewrite strategy.md to encode what's been learned.
 
 Return ONLY valid JSON:
@@ -147,6 +143,7 @@ Return ONLY valid JSON:
     "hook_type": "...",
     "has_numbers": "...",
     "has_question_cta": "...",
+    "has_image": "...",
     "word_count": "...",
     "line_count": "...",
     "content_theme": "...",
@@ -173,14 +170,15 @@ def main():
 
     results = load_results()
     if len(results) < 3:
-        print(f"Only {len(results)} posts with data. Need at least 3. Skipping.")
+        print(f"Only {len(results)} posts. Need at least 3. Skipping.")
         return
 
-    analysis_data = build_analysis_data(results)
+    data = build_analysis(results)
     strategy = (VAULT_ROOT / "strategy.md").read_text(encoding="utf-8") if (VAULT_ROOT / "strategy.md").exists() else ""
+    avg = data["summary"]["avg_engagement_score"]
 
-    print(f"Analyzing {len(results)} posts...")
-    result = run_analysis(client, analysis_data, strategy)
+    print(f"Analyzing {len(results)} posts (avg score: {avg})...")
+    result = run_analysis(client, data, strategy)
 
     (VAULT_ROOT / "strategy.md").write_text(result["updated_strategy_md"], encoding="utf-8")
     print("Updated strategy.md")
@@ -191,9 +189,10 @@ def main():
     report = f"""---
 date: {TODAY}
 week: {WEEK}
-posts_analyzed: {analysis_data['summary']['total_posts']}
-avg_engagement_rate: {analysis_data['summary']['avg_engagement_rate']}
-avg_comment_rate: {analysis_data['summary']['avg_comment_rate']}
+posts_analyzed: {data['summary']['total_posts']}
+avg_engagement_score: {avg}
+avg_comment_ratio: {data['summary']['avg_comment_ratio']}
+avg_insight_ratio: {data['summary']['avg_insight_ratio']}
 ---
 
 # Autoresearch — {TODAY}
@@ -206,17 +205,12 @@ avg_comment_rate: {analysis_data['summary']['avg_comment_rate']}
 |----------|---------|
 {''.join(f"| {k} | {v} |{chr(10)}" for k, v in findings.items())}
 
-## Confirmed Hypotheses
+## Confirmed
 {''.join('- ' + h + chr(10) for h in result.get('confirmed_hypotheses', []))}
-## Rejected Hypotheses
+## Rejected
 {''.join('- ' + h + chr(10) for h in result.get('rejected_hypotheses', []))}
 ## New Hypotheses
 {''.join('- ' + h + chr(10) for h in result.get('new_hypotheses', []))}
-
-## Raw Analysis Data
-```json
-{json.dumps(analysis_data['summary'], indent=2)}
-```
 """
     (analytics_dir / f"{TODAY}_autoresearch.md").write_text(report, encoding="utf-8")
     print(f"Saved: Analytics/{TODAY}_autoresearch.md")
