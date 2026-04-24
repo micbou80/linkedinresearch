@@ -1,1 +1,1 @@
-date	post_url	topic	hook_type	likes	comments	shares	impressions	engagement_rate	scraped_at
+date	posted_time	topic	content_theme	angle	hook_type	hook_text	word_count	line_count	has_numbers	has_question_cta	hashtag_count	lead_magnet_type	likes	comments	shares	impressions	engagement_rate	comment_rate	scraped_at

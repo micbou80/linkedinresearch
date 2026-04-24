@@ -21,11 +21,29 @@ def load_examples() -> str:
         content = f.read_text(encoding="utf-8").strip()
         if content:
             parts.append(f"--- {f.name} ---\n{content}")
-    return "\n\n".join(parts[:3])  # use top 3 examples
+    return "\n\n".join(parts[:3])
 
 
 def load_text(path: Path, fallback: str = "") -> str:
     return path.read_text(encoding="utf-8") if path.exists() else fallback
+
+
+def count_words(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", text))
+
+
+def count_lines(text: str) -> int:
+    return len([l for l in text.split("\n") if l.strip()])
+
+
+def has_numbers(text: str) -> bool:
+    return bool(re.search(r"\b\d+[%hxmk]?\b", text))
+
+
+def has_question_cta(text: str) -> bool:
+    # Check if last 3 non-empty lines contain a question mark
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    return any("?" in l for l in lines[-3:]) if lines else False
 
 
 def generate(client: anthropic.Anthropic) -> dict:
@@ -33,7 +51,6 @@ def generate(client: anthropic.Anthropic) -> dict:
     research = load_text(VAULT_ROOT / "data" / "research_today.md", "No research available.")
     prompts = load_text(VAULT_ROOT / "Agent" / "prompts.md")
     examples = load_examples()
-
     examples_block = f"\n\nEXAMPLE POSTS (match this voice exactly):\n{examples}" if examples else ""
 
     resp = client.messages.create(
@@ -45,14 +62,14 @@ def generate(client: anthropic.Anthropic) -> dict:
 
 CONTENT STRATEGY:
 {strategy}{examples_block}""",
-        messages=[{"role": "user", "content": f"""TODAY'S RESEARCH:\n{research}\n\nPick the single strongest topic and generate today's content.\n\nCRITICAL: The post MUST open with an \"I\" statement — a specific personal experience or result.\nGood: \"I saved 3 hours last week with one prompt.\"\nGood: \"I used to dread Monday mornings. Then I changed one thing.\"\nBad: \"AI is transforming the way we work.\"\n\nReturn ONLY valid JSON:\n{{\n  \"topic\": \"...\",\n  \"hook_type\": \"i_statement_result|i_statement_before_after|i_statement_observation\",\n  \"lead_magnet\": {{\n    \"title\": \"...\",\n    \"type\": \"checklist|template|guide|framework\",\n    \"content\": \"...(full markdown)...\"\n  }},\n  \"post\": {{\n    \"hook\": \"...(first line — must be I statement)...\",\n    \"full_text\": \"...(complete post, no hashtags, 150-250 words)...\",\n    \"hashtags\": [\"AI\", \"Leadership\", \"FutureOfWork\"],\n    \"cta\": \"...\"\n  }}\n}}"""}]
+        messages=[{"role": "user", "content": f"""TODAY'S RESEARCH:\n{research}\n\nPick the single strongest topic and generate today's content.\n\nCRITICAL: The post MUST open with an \"I\" statement — a specific personal experience or result.\nGood: \"I saved 3 hours last week with one prompt.\"\nGood: \"I used to dread Monday mornings. Then I changed one thing.\"\nBad: \"AI is transforming the way we work.\"\n\nReturn ONLY valid JSON:\n{{\n  \"topic\": \"...\",\n  \"content_theme\": \"ai_tools|leadership|future_of_work|tech_culture\",\n  \"angle\": \"how_to|contrarian|data_led|story|observation|list\",\n  \"hook_type\": \"i_statement_result|i_statement_before_after|i_statement_observation\",\n  \"lead_magnet\": {{\n    \"title\": \"...\",\n    \"type\": \"checklist|template|guide|framework\",\n    \"content\": \"...(full markdown)...\"\n  }},\n  \"post\": {{\n    \"hook\": \"...(first line — must be I statement, under 12 words)...\",\n    \"full_text\": \"...(complete post, no hashtags, 150-250 words, short lines with white space)...\",\n    \"hashtags\": [\"AI\", \"Leadership\", \"FutureOfWork\"],\n    \"cta\": \"...\"\n  }}\n}}"""}]
     )
 
     raw = resp.content[0].text
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
         return json.loads(match.group())
-    raise ValueError(f"No JSON in response:\n{raw[:400]}")
+    raise ValueError(f"No JSON:\n{raw[:400]}")
 
 
 def save_post(data: dict):
@@ -60,10 +77,29 @@ def save_post(data: dict):
     posts_dir.mkdir(exist_ok=True)
     post = data["post"]
     hashtags = " ".join(f"#{h.lstrip('#')}" for h in post["hashtags"])
+    full_text = post["full_text"]
+
+    # Compute tracked signals at generation time
+    word_count = count_words(full_text)
+    line_count = count_lines(full_text)
+    numbers = str(has_numbers(full_text)).lower()
+    question_cta = str(has_question_cta(post["cta"] + " " + full_text)).lower()
+    hashtag_count = len(post["hashtags"])
+
     content = f"""---
 date: {TODAY}
+posted_time:
 topic: "{data['topic']}"
+content_theme: {data.get('content_theme', 'unknown')}
+angle: {data.get('angle', 'unknown')}
 hook_type: {data.get('hook_type', 'unknown')}
+hook_text: "{post['hook']}"
+word_count: {word_count}
+line_count: {line_count}
+has_numbers: {numbers}
+has_question_cta: {question_cta}
+hashtag_count: {hashtag_count}
+lead_magnet_type: {data['lead_magnet']['type']}
 lead_magnet: "[[Lead Magnets/{TODAY}|{data['lead_magnet']['title']}]]"
 status: draft
 posted_at:
@@ -73,6 +109,7 @@ engagement:
   shares: 0
   impressions: 0
   engagement_rate: 0.0
+  comment_rate: 0.0
 ---
 
 # {data['topic']}
@@ -81,7 +118,7 @@ engagement:
 {post['hook']}
 
 ## Full Post
-{post['full_text']}
+{full_text}
 
 {hashtags}
 
@@ -89,7 +126,7 @@ engagement:
 [[Lead Magnets/{TODAY}|{data['lead_magnet']['title']}]]
 """
     (posts_dir / f"{TODAY}.md").write_text(content, encoding="utf-8")
-    print(f"Saved: Posts/{TODAY}.md")
+    print(f"Saved: Posts/{TODAY}.md (words: {word_count}, lines: {line_count})")
 
 
 def save_lead_magnet(data: dict):
