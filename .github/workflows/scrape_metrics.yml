@@ -32,7 +32,8 @@ jobs:
         run: |
           git config user.name "Cleo Bot"
           git config user.email "cleo@github-actions"
+          git fetch origin main
+          git rebase origin/main
           git add results.tsv Posts/
           git diff --staged --quiet || git commit -m "data: metrics $(date +%Y-%m-%d)"
-          git pull --rebase origin main
           git push
