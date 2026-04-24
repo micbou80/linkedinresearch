@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Metrics agent — scrapes LinkedIn via Apify, updates results.tsv with full signal set."""
+"""Metrics agent — scrapes LinkedIn via Apify sync endpoint, updates results.tsv."""
 
 import os
 import csv
 import json
 import re
-import time
 import urllib.request
 import urllib.parse
 from datetime import date
@@ -24,26 +23,27 @@ FIELDS = [
 ]
 
 
-def apify(method, path, data=None, token=""):
-    url = f"{APIFY_BASE}{path}?token={token}"
-    body = json.dumps(data).encode() if data else None
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"} if body else {}, method=method)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read())
-
-
-def run_actor(actor_id, input_data, token):
-    res = apify("POST", f"/acts/{urllib.parse.quote(actor_id, safe='')}/runs", input_data, token)
-    run_id = res["data"]["id"]
-    print(f"Run: {run_id}")
-    while True:
-        s = apify("GET", f"/actor-runs/{run_id}", token=token)["data"]
-        print(f"Status: {s['status']}")
-        if s["status"] == "SUCCEEDED":
-            return s["defaultDatasetId"]
-        if s["status"] in ("FAILED", "ABORTED", "TIMED-OUT"):
-            raise RuntimeError(f"Actor {s['status']}")
-        time.sleep(10)
+def run_actor_sync(actor_id: str, input_data: dict, token: str) -> list:
+    """
+    POST /acts/{actorId}/run-sync-get-dataset-items
+    Blocks until the run finishes (up to 300s) and returns dataset items directly.
+    """
+    url = (
+        f"{APIFY_BASE}/acts/{urllib.parse.quote(actor_id, safe='')}"
+        f"/run-sync-get-dataset-items?token={token}&format=json&clean=true"
+    )
+    body = json.dumps(input_data).encode()
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    # LinkedIn scrapers can take a while — use 290s to stay under the 300s API limit
+    with urllib.request.urlopen(req, timeout=290) as resp:
+        items = json.loads(resp.read())
+    print(f"Got {len(items)} items from Apify")
+    return items
 
 
 def load_post_meta() -> dict:
@@ -61,8 +61,7 @@ def load_post_meta() -> dict:
         c = f.read_text(encoding="utf-8")
         record = {}
         for field in fm_fields:
-            pattern = rf'^{field}: "?(.*?)"?$'
-            m = re.search(pattern, c, re.MULTILINE)
+            m = re.search(rf'^{field}: "?(.*?)"?$', c, re.MULTILINE)
             record[field] = m.group(1).strip() if m else ""
         meta[f.stem] = record
     return meta
@@ -84,48 +83,84 @@ def write_results(rows: dict):
     print(f"results.tsv: {len(sorted_rows)} rows")
 
 
-def parse(raw: list) -> list:
+def parse(items: list) -> list:
+    """
+    Normalize Apify output to our schema.
+    Field names vary by actor — we try common variants.
+    """
     posts = []
-    for item in raw:
-        published = item.get("publishedAt") or item.get("postedAt") or item.get("date", "")
-        likes = item.get("likes") or item.get("numLikes") or 0
-        comments = item.get("comments") or item.get("numComments") or 0
-        shares = item.get("shares") or item.get("numShares") or 0
-        impressions = item.get("impressions") or item.get("views") or 0
-        if isinstance(likes, dict): likes = likes.get("count", 0)
-        if isinstance(comments, dict): comments = comments.get("count", 0)
-        likes, comments, shares, impressions = int(likes), int(comments), int(shares), int(impressions)
-        eng_rate = round((likes + comments + shares) / impressions * 100, 4) if impressions > 0 else 0.0
-        comment_rate = round(comments / impressions * 100, 4) if impressions > 0 else 0.0
-        # Try to extract publish time (HH:MM)
+    for item in items:
+        published = (
+            item.get("publishedAt") or item.get("postedAt")
+            or item.get("date") or item.get("createdAt", "")
+        )
+        likes = item.get("likes") or item.get("numLikes") or item.get("likeCount") or 0
+        comments = item.get("comments") or item.get("numComments") or item.get("commentCount") or 0
+        shares = item.get("shares") or item.get("numShares") or item.get("shareCount") or 0
+        impressions = (
+            item.get("impressions") or item.get("views")
+            or item.get("impressionCount") or 0
+        )
+
+        # Some actors return reaction objects instead of counts
+        if isinstance(likes, dict):
+            likes = likes.get("count", 0)
+        if isinstance(comments, dict):
+            comments = comments.get("count", 0)
+
+        likes, comments, shares, impressions = (
+            int(likes), int(comments), int(shares), int(impressions)
+        )
+
+        eng_rate = (
+            round((likes + comments + shares) / impressions * 100, 4)
+            if impressions > 0 else 0.0
+        )
+        comment_rate = (
+            round(comments / impressions * 100, 4)
+            if impressions > 0 else 0.0
+        )
+
+        # Extract date and time from published timestamp
+        post_date = str(published)[:10] if published else ""
         posted_time = ""
         if published and "T" in str(published):
             try:
-                posted_time = str(published)[11:16]  # e.g. "09:30"
+                posted_time = str(published)[11:16]  # HH:MM
             except Exception:
                 pass
+
         posts.append({
-            "date": str(published)[:10] if published else "",
+            "date": post_date,
             "posted_time": posted_time,
-            "url": item.get("url") or item.get("postUrl", ""),
-            "likes": likes, "comments": comments, "shares": shares,
-            "impressions": impressions, "engagement_rate": eng_rate,
-            "comment_rate": comment_rate
+            "url": item.get("url") or item.get("postUrl") or item.get("link", ""),
+            "likes": likes,
+            "comments": comments,
+            "shares": shares,
+            "impressions": impressions,
+            "engagement_rate": eng_rate,
+            "comment_rate": comment_rate,
         })
     return posts
 
 
 def main():
     token = os.environ["APIFY_API_KEY"]
-    actor_id = os.environ.get("APIFY_ACTOR_ID", "curious_coder/linkedin-profile-posts-scraper")
+    actor_id = os.environ["APIFY_ACTOR_ID"]  # e.g. "username~actor-name"
     profile_url = os.environ["LINKEDIN_PROFILE_URL"]
 
-    print(f"Scraping: {profile_url}")
-    dataset_id = run_actor(actor_id, {"profileUrls": [profile_url], "maxPosts": 30}, token)
-    items = apify("GET", f"/datasets/{dataset_id}/items", token=token).get("items", [])
-    print(f"Got {len(items)} items")
+    # Actor input — adjust field names to match your actor's input schema
+    actor_input = {
+        "profileUrls": [profile_url],
+        "maxPosts": 30,
+    }
 
+    print(f"Running actor: {actor_id}")
+    print(f"Profile: {profile_url}")
+
+    items = run_actor_sync(actor_id, actor_input, token)
     posts = parse(items)
+
     meta = load_post_meta()
     existing = load_existing()
 
@@ -154,7 +189,7 @@ def main():
             "impressions": post["impressions"],
             "engagement_rate": post["engagement_rate"],
             "comment_rate": post["comment_rate"],
-            "scraped_at": TODAY
+            "scraped_at": TODAY,
         }
 
     write_results(existing)
