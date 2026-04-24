@@ -1,63 +1,68 @@
-# LinkedIn Lead Magnet Research System
+# LinkedIn Autoresearch
 
-Autonomous LinkedIn content engine that creates daily lead magnets and posts, tracks engagement, and self-improves via weekly analysis — modeled on the autoresearch optimization loop.
+Autonomous LinkedIn content engine. Creates daily posts + lead magnets, tracks engagement, and self-improves its own strategy via an autoresearch loop.
 
 ## How It Works
 
 ```
-[prompts.md] → generate.py → Post + Lead Magnet
-                                       ↓
-                               [You publish to LinkedIn]
-                                       ↓
-                               scrape.py (Apify) → engagement.json
-                                       ↓
-                               analyze.py → updated prompts.md
-                                       ↑
-                                   [repeat]
+[strategy.md + research] → generate_content.py → Post + Lead Magnet
+                                                           ↓
+                                                  [You publish manually]
+                                                           ↓
+                                          apify_scraper.py → results.tsv
+                                                           ↓
+                                          autoresearch.py → updated strategy.md
+                                                           ↑
+                                                       [repeat]
 ```
 
-Like autoresearch:
-- **`prompts.md`** = `train.py` (the thing the agent improves)
-- **`research_brief.md`** = `program.md` (fixed objective)
-- **`engagement_rate`** = `val_bpb` (the metric to optimize)
-- **`analyze.py`** = the agent that rewrites the config
+| autoresearch analogy | this system |
+|---------------------|-------------|
+| `train.py` | `strategy.md` |
+| `program.md` | `Agent/research_brief.md` |
+| `val_bpb` metric | `engagement_rate` in `results.tsv` |
+| Agent modifies code | `autoresearch.py` rewrites strategy |
+
+## Agents
+
+| Script | Role | Schedule |
+|--------|------|----------|
+| `pipeline/research.py` | Reddit + blogs → topic ideas | Daily 6am UTC |
+| `pipeline/generate_content.py` | Research + strategy → post + lead magnet | Daily 6am UTC |
+| `pipeline/apify_scraper.py` | LinkedIn → results.tsv | Daily 8pm UTC |
+| `pipeline/autoresearch.py` | results.tsv → strategy.md rewrite | Mon + Thu 6am UTC |
 
 ## Setup
 
-### 1. GitHub Secrets
-
-Go to **Settings → Secrets → Actions** and add:
+### GitHub Secrets
 
 | Secret | Description |
 |--------|-------------|
 | `ANTHROPIC_API_KEY` | Claude API key |
 | `APIFY_API_KEY` | Apify API key |
-| `APIFY_ACTOR_ID` | LinkedIn scraper actor ID (e.g. `curious_coder/linkedin-profile-posts-scraper`) |
+| `APIFY_ACTOR_ID` | LinkedIn Profile Post Scraper actor ID |
 | `LINKEDIN_PROFILE_URL` | Your LinkedIn profile URL |
+| `BLOTATO_API_KEY` | (Optional) BloTato key for auto-publish |
 
-### 2. Obsidian Sync
+### Obsidian Sync
+Install [Obsidian Git plugin](https://github.com/denolehov/obsidian-git), point to this repo, auto-pull every 5 min.
 
-Install the [Obsidian Git plugin](https://github.com/denolehov/obsidian-git) in your LinkedIn vault. Point it to this repo. Set auto-pull to every 5 minutes — GitHub Actions will push new content daily and Obsidian will pick it up automatically.
-
-## Schedule
-
-| Time (UTC) | Action |
-|------------|--------|
-| 8:00 daily | Generate post + lead magnet |
-| 20:00 daily | Scrape engagement metrics |
-| 9:00 Monday | Run analysis, update prompts |
-
-## Vault Structure
+## File Structure
 
 ```
-Posts/               ← Daily LinkedIn posts (generated)
-Lead Magnets/        ← Daily lead magnets (generated)
-Analytics/           ← Engagement log + weekly analyses
-Agent/
-  prompts.md         ← Evolving generation prompts (auto-updated)
-  research_brief.md  ← Fixed optimization objective (edit manually)
+pipeline/           ← Agent scripts
 data/
-  engagement.json    ← Raw metrics store
-scripts/             ← Python automation
-Dashboard.md         ← Obsidian overview
+  subreddits.json   ← Reddit communities to monitor
+  research_today.md ← Daily synthesized topics (overwritten daily)
+Posts/              ← Generated daily posts
+Lead Magnets/       ← Generated lead magnets
+Analytics/          ← Autoresearch reports
+strategy.md         ← Evolving content playbook (auto-updated)
+results.tsv         ← Post performance log
+examples/           ← Your best posts (add these for voice matching)
 ```
+
+## Adding Your Example Posts
+
+Paste your best-performing LinkedIn posts into `examples/example1.md` etc.
+The content agent reads these for voice and style matching.
