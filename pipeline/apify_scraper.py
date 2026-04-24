@@ -16,6 +16,7 @@ TODAY = date.today().isoformat()
 APIFY_BASE = "https://api.apify.com/v2"
 ACTOR_ID = "apimaestro~linkedin-profile-posts"
 LINKEDIN_USERNAME = "michelbouman"
+LINKEDIN_URL = "https://www.linkedin.com/in/michelbouman"
 RESULTS = VAULT_ROOT / "results.tsv"
 FIELDS = [
     "date", "posted_time", "topic", "content_theme", "angle",
@@ -33,10 +34,12 @@ def run_actor_sync(token: str) -> list:
         f"{APIFY_BASE}/acts/{encoded_id}"
         f"/run-sync-get-dataset-items?token={token}&format=json&clean=true"
     )
+    # Try full URL in profileUsername field — actor accepts both username and URL
     body = json.dumps({
-        "profileUsername": LINKEDIN_USERNAME,
-        "resultLimit": 50,
+        "profileUsername": LINKEDIN_URL,
+        "resultLimit": 30,
     }).encode()
+    print(f"Input: profileUsername={LINKEDIN_URL}")
     req = urllib.request.Request(
         url, data=body,
         headers={"Content-Type": "application/json"},
@@ -46,7 +49,7 @@ def run_actor_sync(token: str) -> list:
         with urllib.request.urlopen(req, timeout=290) as resp:
             raw = resp.read()
             items = json.loads(raw)
-            print(f"Total items from Apify: {len(items)}")
+            print(f"Total items: {len(items)}")
             return items
     except urllib.error.HTTPError as e:
         print(f"HTTP ERROR {e.code}: {e.reason}\n{e.read().decode('utf-8', errors='ignore')}")
@@ -60,15 +63,13 @@ def is_original_post(item: dict) -> bool:
 
 
 def debug_authors(items: list):
-    """Print author info for every item so we can diagnose the filter."""
     print("\n--- Author debug ---")
     for i, item in enumerate(items[:10]):
         author = item.get("author") or {}
         username = author.get("username", "[missing]")
-        name = f"{author.get('first_name', '')} {author.get('last_name', '')}" .strip()
+        name = f"{author.get('first_name', '')} {author.get('last_name', '')}".strip()
         hook = (item.get("text") or "")[:60].replace("\n", " ")
-        is_orig = is_original_post(item)
-        print(f"  [{i}] username={repr(username)} | name={repr(name)} | original={is_orig} | '{hook}'")
+        print(f"  [{i}] username={repr(username)} | name={repr(name)} | '{hook}'")
     print("---\n")
 
 
@@ -90,7 +91,7 @@ def count_lines(text: str) -> int:
 def parse(items: list) -> list:
     debug_authors(items)
     original = [i for i in items if is_original_post(i)]
-    print(f"Original posts: {len(original)} / {len(items)} total")
+    print(f"Original posts: {len(original)} / {len(items)}")
 
     posts = []
     for item in original:
@@ -173,7 +174,7 @@ def write_results(rows: dict):
 
 def main():
     token = os.environ["APIFY_API_KEY"]
-    print(f"Scraping @{LINKEDIN_USERNAME}")
+    print(f"Scraping {LINKEDIN_URL}")
     items = run_actor_sync(token)
     posts = parse(items)
 
